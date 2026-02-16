@@ -3,6 +3,5 @@ pandas
 requests
 beautifulsoup4
 selenium
-webdriver-manager
 plotly
 lxml
