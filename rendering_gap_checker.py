@@ -1,0 +1,217 @@
+import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+import time
+import json
+import plotly.graph_objects as go
+
+# --- 1. THEME & UI CUSTOMIZATION (UPDATED FOR WHITE TEXT) ---
+st.set_page_config(page_title="TITAN SEO AUDITOR", layout="wide", page_icon="🛡️")
+
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+    
+    /* Force Global Text Color to White */
+    html, body, [class*="css"], .stMarkdown, p, span, label { 
+        font-family: 'Inter', sans-serif; 
+        color: #ffffff !important; 
+    }
+    
+    /* Main Background */
+    .stApp { background-color: #0b0e14; }
+    
+    /* Headers */
+    h1, h2, h3, h4, h5, h6 { color: #ffffff !important; }
+
+    /* Tables (Dataframes) Styling */
+    .stTable, table, th, td {
+        color: #ffffff !important;
+        background-color: #161b22 !important;
+        border: 1px solid #30363d !important;
+    }
+    
+    /* Metrics */
+    div[data-testid="stMetricValue"] { color: #ffffff !important; font-weight: bold; }
+    div[data-testid="stMetricLabel"] p { color: #ffffff !important; font-size: 16px; }
+
+    /* Custom Card Style */
+    .audit-card {
+        background: #161b22;
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #30363d;
+        margin-bottom: 20px;
+        color: #ffffff !important;
+    }
+    
+    /* Glowing Health Score */
+    .health-score {
+        font-size: 64px;
+        font-weight: bold;
+        text-align: center;
+        color: #ffffff !important;
+        text-shadow: 0 0 25px rgba(255, 255, 255, 0.4);
+        margin-top: 20px;
+    }
+
+    /* Tabs Styling */
+    button[data-baseweb="tab"] p {
+        color: #ffffff !important;
+    }
+    button[aria-selected="true"] {
+        border-bottom-color: #FF4B4B !important;
+    }
+
+    /* Input Box Text */
+    input { color: white !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. DATA EXTRACTION ENGINE ---
+
+def deep_audit(html, url):
+    if not html: return None
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    meta = {
+        "Title": soup.title.string if soup.title else "N/A",
+        "Description": (soup.find("meta", attrs={"name": "description"}) or {}).get("content", "N/A"),
+        "Canonical": (soup.find("link", rel="canonical") or {}).get("href", "N/A"),
+        "Robots": (soup.find("meta", attrs={"name": "robots"}) or {}).get("content", "index, follow"),
+        "OG Title": (soup.find("meta", property="og:title") or {}).get("content", "N/A"),
+        "Hreflang": [link.get('hreflang') for link in soup.find_all('link', hreflang=True)]
+    }
+
+    headings = {f"H{i}": [h.text.strip() for h in soup.find_all(f'h{i}')] for i in range(1, 4)}
+    links = [a.get('href') for a in soup.find_all('a', href=True)]
+    images = soup.find_all('img')
+    img_data = {"total": len(images), "missing_alt": len([img for img in images if not img.get('alt')])}
+    scripts = soup.find_all('script', src=True)
+    
+    schemas = soup.find_all("script", type="application/ld+json")
+    schema_types = []
+    for s in schemas:
+        try:
+            val = json.loads(s.string)
+            if isinstance(val, dict): schema_types.append(val.get("@type"))
+            elif isinstance(val, list): schema_types.append(val[0].get("@type"))
+        except: pass
+
+    raw_text = soup.get_text()
+    words = raw_text.split()
+    
+    return {
+        "meta": meta,
+        "headings": headings,
+        "links": links,
+        "images": img_data,
+        "scripts": len(scripts),
+        "word_count": len(words),
+        "schema": schema_types,
+        "html_size": len(html) / 1024,
+        "raw_text": raw_text
+    }
+
+def run_analysis(url):
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'}
+    t0 = time.time()
+    res = requests.get(url, headers=headers, timeout=15)
+    t_static = time.time() - t0
+    static_audit = deep_audit(res.text, url)
+    
+    options = Options()
+    options.add_argument("--headless")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    t1 = time.time()
+    driver.get(url)
+    time.sleep(5) 
+    rendered_html = driver.page_source
+    t_rendered = time.time() - t1
+    rendered_audit = deep_audit(rendered_html, url)
+    driver.quit()
+    
+    return static_audit, rendered_audit, t_static, t_rendered
+
+# --- 3. UI DASHBOARD ---
+
+st.title("🛡️ TITAN: Enterprise Technical Auditor")
+st.markdown("<p style='color:white;'>Analyze the rendering gap and technical health of any URL.</p>", unsafe_allow_html=True)
+
+url_input = st.text_input("Enter Enterprise Domain URL:", placeholder="https://www.nike.com/in")
+
+if st.button("EXECUTE DEEP SCAN"):
+    if url_input:
+        with st.spinner("🕵️ CRAWLING..."):
+            s, r, ts, tr = run_analysis(url_input)
+            
+            # --- CALCULATE HEALTH SCORE ---
+            score = 100
+            if r['meta']['Canonical'] == "N/A": score -= 15
+            if not r['headings']['H1']: score -= 15
+            if r['images']['missing_alt'] > 5: score -= 10
+            js_gap = abs(r['word_count'] - s['word_count']) / r['word_count'] if r['word_count'] > 0 else 0
+            if js_gap > 0.3: score -= 20
+
+            # --- SCORE DISPLAY ---
+            st.markdown(f"<div class='health-score'>{score}/100</div>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align:center; color:#ffffff;'>TITAN SEO HEALTH SCORE</p>", unsafe_allow_html=True)
+            st.markdown("---")
+
+            # --- COMPARISON TABLE ---
+            st.subheader("📋 Executive Audit Matrix")
+            comp_df = pd.DataFrame({
+                "Metric": ["Word Count", "Total Links", "H1 Tag", "Canonical URL", "Schema Objects", "HTML Size (KB)", "Images Found", "Scripts Detected"],
+                "Static (Source)": [s['word_count'], len(s['links']), s['headings']['H1'][0] if s['headings']['H1'] else "❌ Missing", s['meta']['Canonical'][:30]+"...", len(s['schema']), round(s['html_size'], 1), s['images']['total'], s['scripts']],
+                "Rendered (JS)": [r['word_count'], len(r['links']), r['headings']['H1'][0] if r['headings']['H1'] else "❌ Missing", r['meta']['Canonical'][:30]+"...", len(r['schema']), round(r['html_size'], 1), r['images']['total'], r['scripts']],
+                "Delta": [f"{r['word_count']-s['word_count']}", f"{len(r['links'])-len(s['links'])}", "Match", "Match", f"{len(r['schema'])-len(s['schema'])}", f"{round(r['html_size']-s['html_size'], 1)}", 0, r['scripts']-s['scripts']]
+            })
+            st.table(comp_df)
+
+            # --- TABS ---
+            tab1, tab2, tab3, tab4 = st.tabs(["💎 Content Integrity", "🏗️ Technical SEO", "🎨 Visual & Social", "🔍 Schema Explorer"])
+
+            with tab1:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("#### Headings Hierarchy")
+                    for level in ['H1', 'H2', 'H3']:
+                        st.write(f"**{level}:** {len(r['headings'][level])} found")
+                        with st.expander(f"View {level} Tags"):
+                            for h in r['headings'][level]: st.text(h)
+                with col_b:
+                    st.markdown("#### JavaScript Reliance")
+                    reliance = round(((r['word_count'] - s['word_count']) / r['word_count']) * 100, 1) if r['word_count'] > 0 else 0
+                    fig = go.Figure(go.Indicator(
+                        mode = "gauge+number", value = reliance,
+                        gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#FF4B4B"}}
+                    ))
+                    fig.update_layout(paper_bgcolor="#161b22", font={'color': "white"}, height=250, margin=dict(l=20, r=20, t=50, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with tab2:
+                st.subheader("Technical Performance")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Load Time (Static)", f"{round(ts, 2)}s")
+                c2.metric("Full Render Time", f"{round(tr, 2)}s")
+                c3.metric("Missing Alt-Text", r['images']['missing_alt'])
+                
+                st.write("**Robots Directive:**", r['meta']['Robots'])
+                st.write("**Hreflang Tags Found:**", r['meta']['Hreflang'])
+
+            with tab3:
+                st.subheader("Social Graph Analysis")
+                st.write("**OpenGraph Title:**", r['meta']['OG Title'])
+                st.write("**Meta Description:**", r['meta']['Description'])
+
+            with tab4:
+                st.subheader("Structured Data Detected")
+                if r['schema']:
+                    st.write(list(set(r['schema'])))
+                else:
+                    st.write("No JSON-LD detected.")
